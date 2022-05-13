@@ -101,7 +101,7 @@ jobs:
     - name: Upload Firmware
       uses: actions/upload-artifact@main
       with:
-        name: ${{matrix.target}}_$(date --utc +'%Y%m%d')_Firmware
+        name: ${{matrix.target}}_${(date --utc +'%Y%m%d')}_Firmware
         path: SMHassOS/release
     
     - name: Delete workflow runs
