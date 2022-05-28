@@ -1,140 +1,119 @@
-# Home Assistant Operating System build workflow
-
-name: Development build
+name: SMHassOS
 
 on:
   workflow_dispatch:
-  pull_request_target:
-    types: [opened,synchronize,labeled]
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+ 
+env:
+  RUN_VALIDATION: true
 
 jobs:
-  prepare:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-dev-build') }}
-    name: Prepare build
-    runs-on: [ "ubuntu-20.04" ]
-    outputs:
-      version_main: ${{ steps.version_main.outputs.version_main }}
-      version_dev: ${{ steps.version_dev.outputs.version_dev }}${{ steps.version_pr.outputs.version_pr }}
-      matrix: ${{ steps.generate_matrix.outputs.result }}
-    steps:
-      - name: Generate Development build version
-        shell: bash
-        id: version_dev
-        run: |
-          version_dev="dev$(date --utc +'%Y%m%d')"
-          echo "Development version \"${version_dev}\""
-          echo "::set-output name=version_dev::${version_dev}"
-      - name: Generate Development build version for PR
-        if: ${{ github.event.pull_request }}
-        shell: bash
-        id: version_pr
-        run: |
-          version_pr=$(printf "%05d" ${{ github.event.pull_request.number }})
-          echo "Development build for PR #${{ github.event.pull_request.number }}"
-          echo "::set-output name=version_pr::${version_pr}"
-      - uses: actions/checkout@v2
-      - name: Get Major/Minor version
-        id: version_main
-        run: |
-          major=$(cat ${GITHUB_WORKSPACE}/buildroot-external/meta | grep VERSION_MAJOR | cut -d'=' -f2)
-          build=$(cat ${GITHUB_WORKSPACE}/buildroot-external/meta | grep VERSION_BUILD | cut -d'=' -f2)
-          echo "::set-output name=version_main::${major}.${build}"
-      - name: Create build matrix
-        uses: actions/github-script@v4
-        id: generate_matrix
-        with:
-          script: |
-            const boards = require('./.github/workflows/matrix.json')
-
-            if (context.eventName == "workflow_dispatch") {
-              console.log("Run full build for all boards")
-              return { "board": boards }
-            }
-
-            const labels = context.payload.pull_request.labels.map(l => l.name)
-            const labelsSet = new Set(labels)
-            const buildBoards = boards.filter(b => labelsSet.has(b.label))
-
-            return { "board": buildBoards }
-
   build:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-dev-build') }}
-    name: Development build for ${{ matrix.board.id }}
-    environment: "dev_build"
-    needs: prepare
+    runs-on: ubuntu-20.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    
+    name: Build ${{matrix.target}}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-    runs-on: ${{ matrix.board.runner }}
+      matrix:
+        target: [rpi3_64,rpi4_64]
 
     steps:
-      - name: Define git reference
-        uses: actions/github-script@v4
-        id: generate_gitref
-        with:
-          script: |
-            if (context.eventName == "workflow_dispatch")
-              return { "ref": context.ref }
-            return { "ref": context.payload.pull_request.head.sha }
+    - name: Checkout
+      uses: actions/checkout@v2
+      
+    - name: Initialization environment
+      run: |
 
-      - name: Checkout source
-        uses: actions/checkout@v2
-        with:
-          submodules: true
-          persist-credentials: false
-          ref: ${{ fromJSON(steps.generate_gitref.outputs.result).ref }}
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "Asia/Shanghai"
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo rm -rf /usr/share/
 
-      - name: Build container
-        run: docker build -t haos-builder .
+    - name: Clone source code  
+      run: |
+        df -hT $PWD
+        
+        git clone https://github.com/home-assistant/operating-system.git -b dev SMHassOS
+    
+    - name: Change Settings.
+      run: |
+        cd SMHassOS
+        
+        sed -i 's/-e\ BUILDER_UID/-e TZ=Asia\/Shanghai\ -e BUILDER_UID/g' buildroot-external/package/hassio/hassio.mk 
+        sed -i 's/-e\ BUILDER_UID/-e TZ=Asia\/Shanghai\ -e BUILDER_UID/g' scripts/enter.sh
+        
+        sed -i 's/-e\ SUPERVISOR_NAME=hassio_supervisor/-e TZ=Asia\/Shanghai\ -e SUPERVISOR_NAME=hassio_supervisor/g' buildroot-external/rootfs-overlay/usr/sbin/hassos-supervisor
+        
+        sed -i '/vhdx/d' buildroot-external/scripts/hdd-image.sh
+        sed -i '/vdi/d' buildroot-external/scripts/hdd-image.sh
+        
+        sed -i 's/homeassistant/SMHassOS/g' buildroot-external/configs/${{matrix.target}}_defconfig
+        sed -i 's/Welcome to Home Assistant/Welcome to Home Assistant (Smart Home)/g' buildroot-external/configs/${{matrix.target}}_defconfig
+        
+        echo "BR2_TARGET_GENERIC_ROOT_PASSWD=\"\"" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_ROOTFS_SKELETON_DEFAULT=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_TARGET_ENABLE_ROOT_LOGIN=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_HOST_LZO=n" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_VIM=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        
+        
+        echo "BR2_PACKAGE_NANO_TINY=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_NTP=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_NTP_SNTP=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_NTPDATE=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_NTPTIME=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_TZDATA=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_HTOP=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_PACKAGE_WGET=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        
+        echo "BR2_TARGET_INFO=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        
+        echo "BR2_PACKAGE_HOST_ZIP=y" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        
+        echo "BR2_TARGET_ZONELIST=\"default\"" >> buildroot-external/configs/${{matrix.target}}_defconfig
+        echo "BR2_TARGET_LOCALTIME=\"Asia/Shanghai\"" >> buildroot-external/configs/${{matrix.target}}_defconfig
 
-      - name: 'Add release PKI certs'
-        env:
-          RAUC_CERTIFICATE: ${{ secrets.RAUC_CERTIFICATE }}
-          RAUC_PRIVATE_KEY: ${{ secrets.RAUC_PRIVATE_KEY }}
-        run: |
-          echo -e "-----BEGIN CERTIFICATE-----\n${RAUC_CERTIFICATE}\n-----END CERTIFICATE-----" > cert.pem
-          echo -e "-----BEGIN PRIVATE KEY-----\n${RAUC_PRIVATE_KEY}\n-----END PRIVATE KEY-----" > key.pem
+    #- name: SSH connection to Actions
+    #  uses: P3TERX/ssh2actions@v1.0.0
+    #  if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+    #  env:
+    #    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    #    TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        
+    - name: Build
+      shell: 'script -q -e -c "bash {0}"'
+      id: build
+      run: |
+        sleep $((RANDOM % 60))    
+        cd SMHassOS
+        ./scripts/enter.sh make -j$(($(nproc) + 1)) ${{matrix.target}}
+        #sudo ./scripts/entry.sh make ${{matrix.target}}
 
-      - name: Build
-        run: |
-          BUILDER_UID="$(id -u)"
-          BUILDER_GID="$(id -g)"
-          docker run --rm --privileged -v "${GITHUB_WORKSPACE}:/build" \
-            -e BUILDER_UID="${BUILDER_UID}" -e BUILDER_GID="${BUILDER_GID}" \
-            -v "${{ matrix.board.runner }}-build-cache:/cache" \
-            -v "/build/output" \
-            haos-builder make BUILDDIR=/build VERSION_DEV=${{ needs.prepare.outputs.version_dev }} ${{ matrix.board.defconfig }}
-
-      - name: Upload images
-        uses: burnett01/rsync-deployments@4.1
-        with:
-          rsh: -q
-          switches: -aW
-          path: release/
-          remote_path: ${{ secrets.DEV_TARGET_PATH }}/${{ needs.prepare.outputs.version_main }}.${{ needs.prepare.outputs.version_dev }}/
-          remote_host: ${{ secrets.DEV_HOST }}
-          remote_port: ${{ secrets.DEV_PORT }}
-          remote_user: ${{ secrets.DEV_USERNAME }}
-          remote_key: ${{ secrets.DEV_SSH_KEY }}
-
-  bump_version:
-    name: Bump dev channel version
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    needs: [ build, prepare ]
-    runs-on: [ "ubuntu-20.04" ]
-
-    steps:
-    - name: Initialize git
-      uses: home-assistant/actions/helpers/git-init@master
+    - name: Upload Firmware
+      uses: actions/upload-artifact@main
       with:
-        name: ${{ secrets.GIT_NAME }}
-        email: ${{ secrets.GIT_EMAIL }}
-        token: ${{ secrets.GIT_TOKEN }}
-
-    - name: Bump Home Assistant OS dev channel version to ${{ needs.prepare.outputs.version_main }}.${{ needs.prepare.outputs.version_dev }}
-      uses: home-assistant/actions/helpers/version-push@master
+        name: ${{matrix.target}}“$(date --utc +'%Y%m%d')”_Firmware
+        path: SMHassOS/release
+    
+    - name: Delete workflow runs
+      uses: GitRML/delete-workflow-runs@main
       with:
-        key: "hassos[]"
-        key-description: "Home Assistant OS"
-        version: ${{ needs.prepare.outputs.version_main }}.${{ needs.prepare.outputs.version_dev }}
-        channel: "dev"
+        retain_days: 1
+        keep_minimum_runs: 1
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.1.0
+      with:
+        keep_latest: 3
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
